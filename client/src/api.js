@@ -102,5 +102,27 @@ export const api = {
   async getPurchaseOrderByBacklogItem(backlogItemId) {
     const response = await axios.get(`${API_BASE_URL}/purchase-orders/${backlogItemId}`)
     return response.data
+  },
+
+  // Restocking: budget-fit recommendations from /api/demand, ranked by demand gap.
+  async getRestockingRecommendations(budget) {
+    const params = new URLSearchParams()
+    params.append('budget', budget)
+    const response = await axios.get(`${API_BASE_URL}/restocking/recommendations?${params.toString()}`)
+    return response.data
+  },
+
+  // Submits a restocking order; backend returns the created SubmittedOrder
+  // (with order_number, expected_delivery, lead_time_days).
+  async placeRestockingOrder({ items, budget }) {
+    const response = await axios.post(`${API_BASE_URL}/restocking/orders`, { items, budget })
+    return response.data
+  },
+
+  // Path is /submitted-orders (not /orders/submitted) to avoid collision with
+  // the /orders/{order_id} route on the backend.
+  async getSubmittedOrders() {
+    const response = await axios.get(`${API_BASE_URL}/submitted-orders`)
+    return response.data
   }
 }

@@ -1,7 +1,8 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
-from pydantic import BaseModel
+from datetime import datetime, timedelta
+from pydantic import BaseModel, Field
 from mock_data import inventory_items, orders, demand_forecasts, backlog_items, spending_summary, monthly_spending, category_spending, recent_transactions, purchase_orders
 
 app = FastAPI(title="Factory Inventory Management System")
@@ -13,6 +14,37 @@ QUARTER_MAP = {
     'Q3-2025': ['2025-07', '2025-08', '2025-09'],
     'Q4-2025': ['2025-10', '2025-11', '2025-12']
 }
+
+# Per-warehouse delivery lead time for restocking orders.
+# Values reflect approximate shipping distance from a (hypothetical) US-based
+# central supplier; used to compute expected_delivery on submitted orders.
+WAREHOUSE_LEAD_TIME_DAYS = {
+    'San Francisco': 5,
+    'London': 10,
+    'Tokyo': 14,
+}
+DEFAULT_LEAD_TIME_DAYS = 10
+
+# Synthetic unit-cost fallback for forecast SKUs that aren't present in
+# inventory.json (the demo data only overlaps on 1 of 9 forecast SKUs).
+# A production system would have a real SKU master.
+SKU_PREFIX_UNIT_COST = {
+    'WDG': 15.00,
+    'BRG': 8.50,
+    'GSK': 2.25,
+    'MTR': 120.00,
+    'FLT': 12.75,
+    'VLV': 45.00,
+    'PSU': 18.99,
+    'SNR': 25.00,
+    'CTL': 75.00,
+}
+DEFAULT_UNIT_COST = 20.00
+
+# In-memory store for restocking orders submitted via /api/restocking/orders.
+# Not persisted — restart clears these (matches mock_data pattern).
+submitted_orders: List[dict] = []
+_submitted_order_seq = 0  # incrementing id source
 
 def filter_by_month(items: list, month: Optional[str]) -> list:
     """Filter items by month/quarter based on order_date field"""
@@ -119,6 +151,64 @@ class CreatePurchaseOrderRequest(BaseModel):
     unit_cost: float
     expected_delivery_date: str
     notes: Optional[str] = None
+
+class RestockingRecommendation(BaseModel):
+    item_sku: str
+    item_name: str
+    warehouse: str
+    current_demand: int
+    forecasted_demand: int
+    suggested_quantity: int  # = forecasted_demand - current_demand
+    unit_cost: float
+    total_cost: float
+    lead_time_days: int
+
+class RestockingOrderItem(BaseModel):
+    item_sku: str
+    item_name: str
+    warehouse: str
+    quantity: int
+    unit_cost: float
+    total_cost: float
+
+class PlaceRestockingOrderRequest(BaseModel):
+    items: List[RestockingOrderItem]
+    budget: Optional[float] = None  # informational; carried into the record
+
+class SubmittedOrder(BaseModel):
+    id: str
+    order_number: str
+    items: List[RestockingOrderItem]
+    total_value: float
+    submitted_at: str
+    expected_delivery: str
+    lead_time_days: int  # max lead time across the order's warehouses
+    warehouses: List[str]
+    status: str  # always "Submitted" on creation
+    budget: Optional[float] = None
+
+# --- Restocking helpers --------------------------------------------------
+
+def _resolve_sku_metadata(sku: str) -> dict:
+    """Return {unit_cost, warehouse} for a forecast SKU.
+
+    Prefers a real inventory match. Falls back to a SKU-prefix unit cost and
+    a deterministic warehouse assignment when the demo data has no match.
+    """
+    match = next((i for i in inventory_items if i['sku'] == sku), None)
+    if match:
+        return {'unit_cost': match['unit_cost'], 'warehouse': match['warehouse']}
+
+    prefix = sku.split('-')[0] if '-' in sku else sku
+    unit_cost = SKU_PREFIX_UNIT_COST.get(prefix, DEFAULT_UNIT_COST)
+    # Deterministic warehouse round-robin so the same SKU always lands in the
+    # same warehouse across requests (stable lead times in the UI).
+    warehouses = list(WAREHOUSE_LEAD_TIME_DAYS.keys())
+    warehouse = warehouses[hash(sku) % len(warehouses)]
+    return {'unit_cost': unit_cost, 'warehouse': warehouse}
+
+def _lead_time(warehouse: str) -> int:
+    return WAREHOUSE_LEAD_TIME_DAYS.get(warehouse, DEFAULT_LEAD_TIME_DAYS)
 
 # API endpoints
 @app.get("/")
@@ -303,6 +393,95 @@ def get_monthly_trends():
     result = list(months.values())
     result.sort(key=lambda x: x['month'])
     return result
+
+# --- Restocking endpoints ------------------------------------------------
+
+@app.get("/api/restocking/recommendations", response_model=List[RestockingRecommendation])
+def get_restocking_recommendations(budget: float = 0):
+    """Greedy budget-fit restocking recommendations.
+
+    Algorithm: rank demand-forecast items by demand gap (forecasted minus
+    current) descending, then walk the list adding items whose total_cost
+    fits in the remaining budget. Items that don't fit are skipped so smaller
+    items further down the list still have a chance.
+    """
+    if budget < 0:
+        raise HTTPException(status_code=400, detail="Budget must be non-negative")
+
+    candidates = []
+    for f in demand_forecasts:
+        gap = f['forecasted_demand'] - f['current_demand']
+        if gap <= 0:
+            continue  # demand falling or steady — no need to restock
+        meta = _resolve_sku_metadata(f['item_sku'])
+        total = round(gap * meta['unit_cost'], 2)
+        candidates.append({
+            'item_sku': f['item_sku'],
+            'item_name': f['item_name'],
+            'warehouse': meta['warehouse'],
+            'current_demand': f['current_demand'],
+            'forecasted_demand': f['forecasted_demand'],
+            'suggested_quantity': gap,
+            'unit_cost': meta['unit_cost'],
+            'total_cost': total,
+            'lead_time_days': _lead_time(meta['warehouse']),
+            '_gap': gap,
+        })
+
+    # Largest gap first; tie-break by lower total_cost so smaller items fit
+    # when gaps are equal.
+    candidates.sort(key=lambda c: (-c['_gap'], c['total_cost']))
+
+    selected = []
+    remaining = budget
+    for c in candidates:
+        if c['total_cost'] <= remaining:
+            selected.append({k: v for k, v in c.items() if not k.startswith('_')})
+            remaining -= c['total_cost']
+
+    return selected
+
+@app.post("/api/restocking/orders", response_model=SubmittedOrder)
+def place_restocking_order(req: PlaceRestockingOrderRequest):
+    """Submit a restocking order and record it in the in-memory store."""
+    if not req.items:
+        raise HTTPException(status_code=400, detail="Order must contain at least one item")
+
+    global _submitted_order_seq
+    _submitted_order_seq += 1
+    now = datetime.now()
+
+    # Multi-warehouse orders take the slowest warehouse's lead time so the
+    # promised delivery date isn't optimistic.
+    warehouses = sorted({item.warehouse for item in req.items})
+    lead = max((_lead_time(w) for w in warehouses), default=DEFAULT_LEAD_TIME_DAYS)
+    expected = (now + timedelta(days=lead)).date().isoformat()
+    total = round(sum(item.total_cost for item in req.items), 2)
+
+    order = {
+        'id': f"sub-{_submitted_order_seq}",
+        'order_number': f"RST-{now.strftime('%Y%m%d')}-{_submitted_order_seq:04d}",
+        'items': [item.dict() for item in req.items],
+        'total_value': total,
+        'submitted_at': now.isoformat(timespec='seconds'),
+        'expected_delivery': expected,
+        'lead_time_days': lead,
+        'warehouses': warehouses,
+        'status': 'Submitted',
+        'budget': req.budget,
+    }
+    submitted_orders.append(order)
+    return order
+
+@app.get("/api/submitted-orders", response_model=List[SubmittedOrder])
+def get_submitted_orders():
+    """List restocking orders submitted via /api/restocking/orders.
+
+    Path is /api/submitted-orders (not /api/orders/submitted) to avoid being
+    shadowed by the /api/orders/{order_id} route declared above.
+    """
+    # Newest first so the most recent submission appears at the top.
+    return sorted(submitted_orders, key=lambda o: o['submitted_at'], reverse=True)
 
 if __name__ == "__main__":
     import uvicorn

@@ -4,6 +4,7 @@ export default {
     overview: 'Overview',
     inventory: 'Inventory',
     orders: 'Orders',
+    restocking: 'Restocking',
     finance: 'Finance',
     demandForecast: 'Demand Forecast',
     companyName: 'Catalyst Components',
@@ -106,6 +107,7 @@ export default {
     title: 'Orders',
     description: 'View and manage customer orders',
     allOrders: 'All Orders',
+    submittedOrders: 'Submitted Orders',
     totalOrders: 'Total Orders',
     totalRevenue: 'Total Revenue',
     avgOrderValue: 'Avg Order Value',
@@ -120,13 +122,41 @@ export default {
       customer: 'Customer',
       category: 'Category',
       warehouse: 'Warehouse',
+      warehouses: 'Warehouses',
       items: 'Items',
       value: 'Value',
       totalValue: 'Total Value',
       status: 'Status',
       expectedDelivery: 'Expected Delivery',
-      actualDelivery: 'Actual Delivery'
+      actualDelivery: 'Actual Delivery',
+      submittedAt: 'Submitted At',
+      leadTime: 'Lead Time'
     }
+  },
+
+  // Restocking
+  restocking: {
+    title: 'Restocking',
+    description: 'Set your budget and submit restocking orders based on demand forecasts.',
+    budgetLabel: 'Available budget',
+    recommendedItems: 'Recommended items',
+    totalCost: 'Total cost',
+    remainingBudget: 'Remaining budget',
+    recommendations: 'Recommendations',
+    noRecommendations: 'Budget is too small for any recommended items. Try increasing the slider.',
+    placeOrder: 'Place Order',
+    placing: 'Placing order...',
+    orderPlaced: 'Order {orderNumber} placed. Expected delivery {date} ({days} day lead time).',
+    table: {
+      sku: 'SKU',
+      itemName: 'Item',
+      warehouse: 'Warehouse',
+      quantity: 'Qty',
+      unitCost: 'Unit Cost',
+      totalCost: 'Total Cost',
+      leadTime: 'Lead Time'
+    },
+    leadTimeDays: '{days} days'
   },
 
   // Finance/Spending

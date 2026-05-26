@@ -27,6 +27,57 @@
         </div>
       </div>
 
+      <!-- Submitted restocking orders — only rendered when the list is non-empty.
+           Not filtered by the global FilterBar; fetched independently. -->
+      <div v-if="submittedOrders.length > 0" class="card">
+        <div class="card-header">
+          <h3 class="card-title">{{ t('orders.submittedOrders') }}</h3>
+        </div>
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>{{ t('orders.table.orderNumber') }}</th>
+                <th>{{ t('orders.table.submittedAt') }}</th>
+                <th>{{ t('orders.table.warehouses') }}</th>
+                <th>{{ t('orders.table.items') }}</th>
+                <th>{{ t('orders.table.leadTime') }}</th>
+                <th>{{ t('orders.table.expectedDelivery') }}</th>
+                <th>{{ t('orders.table.totalValue') }}</th>
+                <th>{{ t('orders.table.status') }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="order in submittedOrders" :key="order.id">
+                <td><strong>{{ order.order_number }}</strong></td>
+                <td>{{ formatDate(order.submitted_at) }}</td>
+                <td>{{ order.warehouses ? order.warehouses.join(', ') : '-' }}</td>
+                <td>
+                  <details class="items-details">
+                    <summary class="items-summary">
+                      {{ t('orders.itemsCount', { count: order.items ? order.items.length : 0 }) }}
+                    </summary>
+                    <div class="items-dropdown">
+                      <div v-for="item in order.items" :key="item.item_sku" class="item-entry">
+                        <span class="item-name">{{ item.item_name }}</span>
+                        <span class="item-meta">
+                          {{ t('orders.quantity') }}: {{ item.suggested_quantity }}
+                          @ {{ currencySymbol }}{{ item.unit_cost }}
+                        </span>
+                      </div>
+                    </div>
+                  </details>
+                </td>
+                <td>{{ order.lead_time_days }} days</td>
+                <td>{{ formatDate(order.expected_delivery) }}</td>
+                <td><strong>{{ currencySymbol }}{{ order.total_value ? order.total_value.toLocaleString() : '-' }}</strong></td>
+                <td><span class="badge info">{{ order.status }}</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
       <div class="card">
         <div class="card-header">
           <h3 class="card-title">{{ t('orders.allOrders') }} ({{ orders.length }})</h3>
@@ -96,6 +147,10 @@ export default {
     const error = ref(null)
     const orders = ref([])
 
+    // Submitted restocking orders — fetched independently of the global filter bar.
+    // If the fetch fails we simply leave the array empty and hide the section.
+    const submittedOrders = ref([])
+
     // Use shared filters
     const {
       selectedPeriod,
@@ -121,6 +176,17 @@ export default {
         error.value = 'Failed to load orders: ' + err.message
       } finally {
         loading.value = false
+      }
+    }
+
+    // Load submitted restocking orders silently — the rest of the page is not
+    // gated on this call; failures simply leave the section hidden.
+    const loadSubmittedOrders = async () => {
+      try {
+        submittedOrders.value = await api.getSubmittedOrders()
+      } catch (err) {
+        // Intentionally swallowed — section just won't render
+        console.error('Failed to load submitted orders:', err)
       }
     }
 
@@ -153,13 +219,19 @@ export default {
       })
     }
 
-    onMounted(loadOrders)
+    onMounted(() => {
+      loadOrders()
+      // Fetch submitted orders alongside the main data so the section populates
+      // on navigation without delaying the primary content.
+      loadSubmittedOrders()
+    })
 
     return {
       t,
       loading,
       error,
       orders,
+      submittedOrders,
       getOrdersByStatus,
       getOrderStatusClass,
       formatDate,
